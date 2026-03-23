@@ -8,10 +8,14 @@ using Unity.Netcode;
 /// Özellikler:
 /// - Smooth WASD hareket (acceleration/deceleration)
 /// - Sprint mekanizması
-/// - Precise jump + gravity
+/// - Precise jump + gravity (terminal velocity dahil)
+/// - Coyote time + jump buffer
+/// - Variable jump height
 /// - Mouse look (yaw + pitch)
 /// - Multiplayer sync (NetworkTransform ile)
 /// - Zero drift guarantee (kendi kendine hareket yok)
+/// - Cursor auto-unlock on focus loss
+/// - OnLanded virtual hook (alt sınıflar için genişletilebilir)
 /// - Debug logging sistemi
 /// </summary>
 [RequireComponent(typeof(CharacterController))]
@@ -52,6 +56,8 @@ public class PlayerMovementCC : NetworkBehaviour
     [SerializeField] private float gravity = -15f;
     [Tooltip("Yere yapışma kuvveti (rampalarda kaymaması için)")]
     [SerializeField] private float groundStickForce = -2f;
+    [Tooltip("Terminal hız - maksimum düşme hızı (negatif değer)")]
+    [SerializeField] private float terminalVelocity = -30f;
     [Tooltip("Coyote time - Kenardan düştükten sonra zıplama toleransı (saniye)")]
     [SerializeField] private float coyoteTime = 0.15f;
     [Tooltip("Jump buffer - Yere inmeden önce basılan jump toleransı (saniye)")]
@@ -87,6 +93,9 @@ public class PlayerMovementCC : NetworkBehaviour
     private float coyoteTimeCounter;
     private float jumpBufferCounter;
     private bool wasGrounded;
+    
+    // Cached Input State
+    private bool isSprinting;
     
     // Owner Control
     private bool isOwnerActive;
@@ -131,11 +140,22 @@ public class PlayerMovementCC : NetworkBehaviour
         base.OnNetworkDespawn();
         
         if (IsOwner)
-        {
-            // Cursor'u serbest bırak
-            Cursor.lockState = CursorLockMode.None;
-            Cursor.visible = true;
-        }
+            UnlockCursor();
+    }
+    
+    private void OnApplicationFocus(bool hasFocus)
+    {
+        if (!IsOwner || !isOwnerActive) return;
+        
+        // Uygulama focus kaybedince cursor'u serbest bırak
+        if (!hasFocus && Cursor.lockState == CursorLockMode.Locked)
+            UnlockCursor();
+    }
+    
+    private void UnlockCursor()
+    {
+        Cursor.lockState = CursorLockMode.None;
+        Cursor.visible = true;
     }
     
     private void Update()
@@ -147,6 +167,10 @@ public class PlayerMovementCC : NetworkBehaviour
         HandleJumpMechanics();
         ApplyGravity();
         MoveCharacter();
+        
+        // Landing detection
+        bool justLanded = !wasGrounded && characterController.isGrounded;
+        if (justLanded) OnLanded();
         
         // Ground state tracking
         wasGrounded = characterController.isGrounded;
@@ -160,8 +184,7 @@ public class PlayerMovementCC : NetworkBehaviour
     {
         // Cursor lock - BAŞLANGIÇTA KİLİTLEME (UI'a tıklayabilmek için)
         // İlk mouse click ile kilitlenecek
-        Cursor.lockState = CursorLockMode.None;
-        Cursor.visible = true;
+        UnlockCursor();
         
         // Rotation başlangıç değerleri
         currentYaw = transform.eulerAngles.y;
@@ -202,8 +225,7 @@ public class PlayerMovementCC : NetworkBehaviour
         // ESC ile unlock
         if (Input.GetKeyDown(KeyCode.Escape))
         {
-            Cursor.lockState = CursorLockMode.None;
-            Cursor.visible = true;
+            UnlockCursor();
             return;
         }
         
@@ -273,7 +295,7 @@ public class PlayerMovementCC : NetworkBehaviour
         // ═══════════════════════════════════════════════════
         // SPEED HESAPLAMA
         // ═══════════════════════════════════════════════════
-        bool isSprinting = Input.GetKey(sprintKey);
+        isSprinting = Input.GetKey(sprintKey);
         float targetSpeed = isSprinting ? sprintSpeed : walkSpeed;
         
         // ═══════════════════════════════════════════════════
@@ -391,6 +413,16 @@ public class PlayerMovementCC : NetworkBehaviour
             Log($"JUMP! Height: {jumpHeight}m | Initial velocity: {verticalVelocity:F2}");
     }
     
+    /// <summary>
+    /// Called the frame the character touches the ground after being airborne.
+    /// Override in a subclass to add landing effects, sounds, or camera shake.
+    /// </summary>
+    protected virtual void OnLanded()
+    {
+        if (showDebugLogs)
+            Log("Landed!");
+    }
+    
     #endregion
     
     #region Gravity
@@ -409,6 +441,9 @@ public class PlayerMovementCC : NetworkBehaviour
         {
             // Havadayken gravity uygula
             verticalVelocity += gravity * Time.deltaTime;
+            
+            // Terminal velocity - maksimum düşme hızını sınırla
+            verticalVelocity = Mathf.Max(verticalVelocity, terminalVelocity);
         }
     }
     
@@ -468,7 +503,7 @@ public class PlayerMovementCC : NetworkBehaviour
     
     public bool IsGrounded => characterController.isGrounded;
     public bool IsMoving => planarVelocity.sqrMagnitude > 0.1f;
-    public bool IsSprinting => Input.GetKey(sprintKey) && IsMoving;
+    public bool IsSprinting => isSprinting && IsMoving;
     public float CurrentSpeed => planarVelocity.magnitude;
     public Vector3 Velocity => new Vector3(planarVelocity.x, verticalVelocity, planarVelocity.z);
     
